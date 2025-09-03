@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>TM 프로토대리 – 포즈 조종 3D 비행기</title>
+
+  <!-- Three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <!-- TensorFlow.js & Teachable Machine Pose -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+
+  <!-- 코어 서비스 (파일 2) -->
+  <script src="./tm_core_services_pose.js"></script>
+
+  <style>
+    :root { --panel: rgba(0,0,0,.5); --accent:#21a1f1; --txt:#fff; }
+    *{box-sizing:border-box} html,body{height:100%;margin:0;background:#0d1117;color:var(--txt);font-family:system-ui, -apple-system, Segoe UI, Roboto, 'Inter', sans-serif;}
+    #game-container{position:relative;width:100%;height:100%;}
+    canvas{display:block;width:100%;height:100%;}
+    .ui-screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.45);z-index:10;transition:.3s;gap:16px;text-align:center}
+    .ui-card{position:absolute;left:50%;top:24px;transform:translateX(-50%);background:var(--panel);border-radius:12px;padding:12px 18px;display:flex;gap:18px;align-items:center;z-index:6}
+    .ui-item{font-weight:700}
+    .hidden{opacity:0;pointer-events:none}
+    .row{display:flex;gap:8px}
+    .input{min-width:420px;max-width:80vw;padding:10px 12px;border-radius:10px;border:none;background:#111827;color:#e5e7eb;outline:1px solid #374151}
+    .btn{padding:10px 16px;border:0;border-radius:10px;font-weight:700;color:#fff;background:var(--accent);cursor:pointer}
+    .btn.ghost{background:#374151}
+    #mini-cam{position:absolute;right:16px;top:16px;width:240px;max-width:35vw;background:var(--panel);padding:8px;border-radius:12px;backdrop-filter: blur(4px);z-index:7}
+    #mini-cam .label{font-size:12px;color:#e5e7eb;margin-bottom:6px;display:flex;justify-content:space-between;gap:8px}
+  #mini-cam video,#mini-cam canvas{display:block;width:100%;border-radius:10px;background:#000;transform:scaleX(-1);}
+    #message-box{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);padding:14px 22px;background:rgba(255,0,0,.8);border-radius:12px;font-weight:700;display:none;z-index:20}
+  #hud { transition: transform .12s ease; }
+  #label-display.active { background: rgba(255,255,255,.08); padding:4px 8px; border-radius:6px; transition: background .2s; }
+  /* HUD 위치를 좌상단으로 고정 */
+  #hud{ left:16px !important; top:16px !important; transform:none !important; z-index:9 }
+  /* 미니캠 아래 라벨 스타일 */
+  #mini-cam .mini-label { margin-top:8px; font-size:13px; text-align:center; color:#e5e7eb; background:rgba(0,0,0,.25); padding:6px 8px; border-radius:8px }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <!-- =============== 시작 화면 =============== -->
+    <div id="start-screen" class="ui-screen">
+      <div style="font-size:2rem;font-weight:800">포즈 조종 3D 비행기</div>
+      <div>모델 URL을 로드하고, 게임 시작을 누르면 우상단 카메라로 실시간 포즈 인식!</div>
+      <div class="row">
+        <input id="modelUrl" class="input" placeholder="https://teachablemachine.withgoogle.com/models/XXXXXX/"/>
+        <button id="btnLoad" class="btn">모델 로드</button>
+      </div>
+  <div id="loadStatus" style="font-size:.9rem;opacity:.85;margin-top:6px">모델 상태: 대기</div>
+      <div class="row">
+        <button id="btnStartGame" class="btn">게임 시작</button>
+        <button id="btnHow" class="btn ghost">조작 안내</button>
+      </div>
+      <div style="font-size:.9rem;opacity:.8">HTTPS/localhost 권장 · 카메라 권한 필요 · CORS 오류 시 개발자도구 확인</div>
+    </div>
+    <div id="hud" class="ui-card hidden">
+  <!-- 목숨 제거: 시간 기반으로 동작 -->
+  <div class="ui-item">시간: <span id="timer-display">0</span>초</div>
+  <div class="ui-item">점수: <span id="score-count">0</span></div>
+  <!-- 라벨은 mini-cam 아래에 표시합니다 -->
+      <div class="ui-item" style="font-weight:500;opacity:.85">WASD/방향키도 가능</div>
+  <div class="ui-item" style="display:flex;align-items:center;gap:8px">
+    <label for="bgm-slider" style="font-weight:600;font-size:12px">BGM</label>
+    <input id="bgm-slider" type="range" min="0" max="100" value="100" style="width:120px" />
+    <span id="bgm-volume-display" style="font-size:12px;opacity:.9">100%</span>
+  </div>
+    </div>
+
+    <!-- =============== 우상단 카메라 =============== -->
+    <div id="mini-cam" class="hidden">
+      <div class="label"><span>카메라</span><span id="status">대기 중…</span></div>
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="overlay"></canvas>
+  <div class="mini-label" id="mini-label">라벨: -</div>
+    </div>
+
+    <!-- =============== 게임 오버 화면 =============== -->
+    <div id="game-over-screen" class="ui-screen hidden">
+      <div style="font-size:2rem;font-weight:800">게임 오버!</div>
+      <div>최종 점수: <span id="final-score">0</span></div>
+      <div class="row">
+        <button id="btnRestart" class="btn">다시 시작</button>
+        <button id="btnExit" class="btn ghost">처음으로</button>
+      </div>
+    </div>
+
+    <!-- 메시지 -->
+    <div id="message-box"></div>
+  </div>
+
+<script>
+/* ===================== 코어 호출부 vs UI 프레임 경계 ===================== */
+/* 이 파일은 UI 프레임 + 게임 로직 + UiBridge.
+   모델/카메라/결과 로직은 tm_core_services_pose.js의 TMCorePose를 사용. */
+
+const { ModelService, CameraService, ResultService } = window.TMCorePose;
+
+// ---------- DOM ----------
+const $ = id => document.getElementById(id);
+const startScreen = $('start-screen');
+const gameOverScreen = $('game-over-screen');
+const hud = $('hud');
+const loadStatus = $('loadStatus');
+const btnLoad = $('btnLoad');
+const btnStartGame = $('btnStartGame');
+const btnHow = $('btnHow');
+const btnRestart = $('btnRestart');
+const btnExit = $('btnExit');
+const modelUrl = $('modelUrl');
+const timerDisplay = $('timer-display');
+const finalScore = $('final-score');
+const miniLabel = $('mini-label');
+const miniCam = $('mini-cam');
+const statusEl = $('status');
+const video = $('video');
+const overlay = $('overlay');
+const messageBox = $('message-box');
+
+// ---------- 게임 상태 ----------
+let scene, camera, renderer, clock, airplane, terrain;
+let obstacles = [], trees = [];
+let moveState = { up:false, down:false, left:false, right:false };
+let isGameStarted = false, isGameOver = false;
+let startTime = 0, elapsedTime = 0;
+let timeLeft = 60; // countdown in seconds
+let score = 0;
+let obstacleSpawnInterval = 1000, obstacleSpeed = 0.05, difficultyIncreaseTimer = 0;
+let animationFrameId = null, obstacleTimer = null;
+let initialAnimationId = null; // for title preview loop
+let isPaused = false;
+let needResetOnResume = false;
+const GROUND_Y = -4;
+
+// ---------- 포즈 루프 상태 ----------
+let running = false;         // 분류 rAF 토글
+let rafPose = null;
+let lastLabel = '';          // 안정화
+let repeatCount = 0;
+const PROB_TH = 0.6;         // 임계 확률
+const STICKY = 2;            // 같은 라벨 연속 n회 이상일 때만 반영
+let lastDisplayedSecond = null;
+let displayLabel = '-';
+// 미니캠을 CSS로 좌우 반전했을 때 레이블/조작 매핑도 반전해야 함
+const MIRROR_VIDEO = true;
+
+// ---------- 유틸 ----------
+function showMessage(text, duration=1000){
+  messageBox.textContent = text;
+  messageBox.style.display = 'block';
+  setTimeout(()=>messageBox.style.display='none', duration);
+}
+function setStatus(t){ statusEl.textContent = t; }
+function setHUD(show){ hud.classList.toggle('hidden', !show); }
+function setMiniCam(show){ miniCam.classList.toggle('hidden', !show); }
+function setStartScreen(show){ startScreen.classList.toggle('hidden', !show); }
+function setGameOverScreen(show){ gameOverScreen.classList.toggle('hidden', !show); }
+function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+
+// ---------- AudioManager (WebAudio) ----------
+const AudioManager = (()=>{
+  let ctx=null, masterGain=null, bgmTimer=null, playing=false;
+  function init(){ if (ctx) return; ctx = new (window.AudioContext||window.webkitAudioContext)(); masterGain = ctx.createGain(); masterGain.gain.value = 1.0; masterGain.connect(ctx.destination); }
+  function startBgm(){ try{ if (!ctx) init(); if (ctx.state==='suspended') ctx.resume(); if (playing) return; playing = true; let step=0; const seq = [880, 784, 880, 988, 1046, 988, 880, 784]; bgmTimer = setInterval(()=>{ const now = ctx.currentTime; const f = seq[step % seq.length]; const osc = ctx.createOscillator(); osc.type = 'square'; osc.frequency.setValueAtTime(f, now); const g = ctx.createGain(); g.gain.setValueAtTime(0, now); g.gain.linearRampToValueAtTime(0.08, now+0.01); g.gain.exponentialRampToValueAtTime(0.0001, now+0.28); osc.connect(g); g.connect(masterGain); osc.start(now); osc.stop(now+0.28); step++; }, 300); }catch(e){ console.error('Audio startBgm failed', e); } }
+  function stopBgm(){ try{ if (bgmTimer) clearInterval(bgmTimer); bgmTimer = null; playing = false; if (masterGain && ctx) masterGain.gain.setValueAtTime(0, ctx.currentTime); }catch(e){console.error(e);} }
+  function playCoin(){ try{ if (!ctx) init(); if (ctx.state==='suspended') ctx.resume(); const now = ctx.currentTime; const o = ctx.createOscillator(); o.type='square'; o.frequency.setValueAtTime(1400, now); o.frequency.exponentialRampToValueAtTime(400, now+0.18); const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now); g.gain.exponentialRampToValueAtTime(0.8, now+0.01); g.gain.exponentialRampToValueAtTime(0.0001, now+0.2); o.connect(g); g.connect(masterGain); o.start(now); o.stop(now+0.22); }catch(e){console.error('playCoin failed', e);} }
+  function setVolume(pct){ try{ if (!ctx) init(); masterGain.gain.setValueAtTime(Math.max(0,Math.min(1,pct)), ctx.currentTime); }catch(e){} }
+  function getVolume(){ return masterGain ? masterGain.gain.value : 0.12; }
+  return { init, startBgm, stopBgm, playCoin, setVolume, getVolume };
+})();
+
+// extend return to include volume funcs
+
+// ---------- SoundPlayer (HTMLAudio fallback / local files) ----------
+const SoundPlayer = (()=>{
+  const base = './assets/'; // files found in assets/ directory
+  const files = { start: base + 'start.mp3', bgm: base + 'bgm.mp3', coin: base + 'coin.mp3', gameover: base + 'game-over.mp3' };
+  const aud = {};
+  function tryCreate(){
+    for(const k of Object.keys(files)){
+      try{ const a = new Audio(files[k]); a.preload='auto'; a.loop = (k==='bgm'); aud[k]=a; }catch(e){ aud[k]=null; }
+    }
+  }
+  function play(name){
+    const a = aud[name];
+    if (a){ try{ a.currentTime = 0; a.play(); return true; }catch(e){ console.warn('SoundPlayer play failed', name, e); return false; } }
+    return false;
+  }
+  function stop(name){ const a=aud[name]; if (a){ try{ a.pause(); a.currentTime=0; }catch(e){} } }
+  tryCreate();
+  return { play, stop, aud };
+})();
+
+// add volume control to SoundPlayer
+SoundPlayer.setVolume = function(pct){ // pct: 0..1
+  for(const k of Object.keys(SoundPlayer.aud)){
+    const a = SoundPlayer.aud[k]; if (!a) continue; try{ a.volume = Math.max(0,Math.min(1,pct)); }catch(e){}
+  }
+};
+SoundPlayer.getVolume = function(){ const a = SoundPlayer.aud['bgm']; return a ? a.volume : 1.0; };
+
+// wire HUD slider
+const bgmSlider = $('bgm-slider'); const bgmVolDisplay = $('bgm-volume-display');
+function setBgmVolumeFromSlider(v){ const pct = Math.max(0,Math.min(100,Number(v))); const norm = pct/100; bgmVolDisplay.textContent = pct + '%'; try{ SoundPlayer.setVolume(norm); }catch(e){} try{ AudioManager.setVolume && AudioManager.setVolume(norm); }catch(e){} }
+if (bgmSlider){ bgmSlider.addEventListener('input', ()=> setBgmVolumeFromSlider(bgmSlider.value)); setBgmVolumeFromSlider(bgmSlider.value); }
+
+// ---------- Three.js 오브젝트 ----------
+function createAirplane(){
+  const g = new THREE.Group();
+  const m = new THREE.MeshLambertMaterial({ color: 0x21a1f1 });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, .5, 4), m); g.add(body);
+  const cockpit = new THREE.Mesh(new THREE.BoxGeometry(.8,.4,1.2), m); cockpit.position.set(0,.3,1.5); g.add(cockpit);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(6,.1,1.5), m); wing.position.set(0,.1,0); g.add(wing);
+  const tailH = new THREE.Mesh(new THREE.BoxGeometry(2,.1,.8), m); tailH.position.set(0,.1,-2); g.add(tailH);
+  const tailV = new THREE.Mesh(new THREE.BoxGeometry(.1,.8,.8), m); tailV.position.set(0,.5,-2); g.add(tailV);
+  g.rotation.y = Math.PI; return g;
+}
+function createTerrain(){
+  const geom = new THREE.PlaneGeometry(200,200,20,20);
+  const mat = new THREE.MeshLambertMaterial({ color:0x559955, side:THREE.DoubleSide, flatShading:true });
+  const mesh = new THREE.Mesh(geom, mat);
+  const verts = mesh.geometry.attributes.position.array;
+  for (let i=0;i<verts.length;i+=3) verts[i+1] += (Math.random()-.5)*5;
+  mesh.geometry.attributes.position.needsUpdate = true; mesh.geometry.computeVertexNormals();
+  mesh.rotation.x = -Math.PI/2; mesh.position.y = -5; return mesh;
+}
+function createTree(){
+  const grp = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.BoxGeometry(1,3,1), new THREE.MeshLambertMaterial({ color:0x8b4513 }));
+  const leaves = new THREE.Mesh(new THREE.BoxGeometry(3,3,3), new THREE.MeshLambertMaterial({ color:0x228b22 }));
+  leaves.position.y = 2; grp.add(trunk); grp.add(leaves); return grp;
+}
+function createObstacle(initial=false){
+  const obs = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), new THREE.MeshLambertMaterial({ color:0xff0000 }));
+  const x = (Math.random()-.5)*50, y=(Math.random()-.5)*20+5, z= initial ? (Math.random()*-100) : -100;
+  obs.position.set(x,y,z); scene.add(obs); obstacles.push(obs);
+}
+
+// ---------- 초기 장면 (타이틀 배경) ----------
+function setupInitialScene(){
+  scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
+  camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, .1, 1000);
+  camera.position.set(0,5,15); camera.lookAt(0,0,0);
+  renderer = new THREE.WebGLRenderer({ antialias:true }); renderer.setSize(innerWidth, innerHeight);
+  renderer.domElement.style.position = 'fixed';
+  renderer.domElement.style.top = '0';
+  renderer.domElement.style.left = '0';
+  renderer.domElement.style.zIndex = '0';
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  $('game-container').appendChild(renderer.domElement);
+
+  const amb = new THREE.AmbientLight(0xffffff,.5); scene.add(amb);
+  const dir = new THREE.DirectionalLight(0xffffff,.8); dir.position.set(5,10,7.5); scene.add(dir);
+
+  const plane = createAirplane(); plane.position.set(0,5,0); scene.add(plane);
+  const terr = createTerrain(); scene.add(terr);
+
+  for(let i=0;i<50;i++){ const t = createTree(); t.position.set((Math.random()-.5)*200, -5+Math.random()*2, (Math.random()-.5)*200); scene.add(t); trees.push(t); }
+  for(let i=0;i<20;i++) createObstacle(true);
+
+  function anim(){
+    initialAnimationId = requestAnimationFrame(anim);
+    obstacles.forEach(o=>{ o.position.z += .1; if (o.position.z > camera.position.z) { o.position.z = -100; o.position.x=(Math.random()-.5)*50; o.position.y=(Math.random()-.5)*20+5; } });
+    trees.forEach(t=>{ t.position.z += .1; if (t.position.z > camera.position.z+10) { t.position.z = -100; t.position.x=(Math.random()-.5)*200; } });
+    renderer.render(scene,camera);
+  }
+  anim();
+}
+
+// ---------- 실제 게임 셋업 ----------
+function initGame(){
+  // stop title animation and dispose previous renderer/canvas to free GL resources
+  if (initialAnimationId) { cancelAnimationFrame(initialAnimationId); initialAnimationId = null; }
+  try{ if (renderer && renderer.dispose) renderer.dispose(); }catch(e){}
+  const old = document.querySelector('canvas'); if (old) old.remove();
+  scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
+  camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, .1, 1000);
+  renderer = new THREE.WebGLRenderer({ antialias:true }); renderer.setSize(innerWidth, innerHeight);
+  renderer.domElement.style.position = 'fixed';
+  renderer.domElement.style.top = '0';
+  renderer.domElement.style.left = '0';
+  renderer.domElement.style.zIndex = '0';
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  $('game-container').appendChild(renderer.domElement);
+  clock = new THREE.Clock();
+
+  const amb = new THREE.AmbientLight(0xffffff,.5); scene.add(amb);
+  const dir = new THREE.DirectionalLight(0xffffff,.8); dir.position.set(5,10,7.5); scene.add(dir);
+
+  airplane = createAirplane(); airplane.position.set(0,0,0); scene.add(airplane);
+  terrain = createTerrain(); scene.add(terrain);
+
+  // seed background trees and obstacles to mirror the title preview
+  obstacles.forEach(o=>scene.remove(o)); obstacles=[];
+  trees.forEach(t=>{ if (t.parent) scene.remove(t); }); trees = [];
+  for(let i=0;i<50;i++){ const t = createTree(); t.position.set((Math.random()-.5)*200, -5+Math.random()*2, (Math.random()-.5)*200); scene.add(t); trees.push(t); }
+  for(let i=0;i<12;i++) createObstacle(true);
+}
+
+// ---------- 게임 시작/루프 ----------
+function startGame(){
+  // ensure any previous loops are stopped
+  if (animationFrameId) cancelAnimationFrame(animationFrameId);
+  isGameStarted = true; isGameOver = false; elapsedTime=0; startTime=Date.now();
+  obstacleSpeed=.05; difficultyIncreaseTimer=0;
+  updateUI(); setStartScreen(false); setGameOverScreen(false); setHUD(true); setMiniCam(true);
+
+  camera.position.set(0,5,15); camera.lookAt(airplane.position);
+
+  // 장애물 타이머
+  obstacleTimer && clearInterval(obstacleTimer);
+  // initialize timer and score
+  timeLeft = 60; score = 0; window._speedBoosted = false;
+  // seed a few obstacles immediately so scene is not empty
+  for(let i=0;i<6;i++) createObstacle(false);
+  obstacleTimer = setInterval(()=>createObstacle(false), obstacleSpawnInterval);
+  updateUI();
+  // play start sound then BGM (use local files if available, else AudioManager)
+  try{
+    if (!SoundPlayer.play('start')){ AudioManager.playCoin(); }
+  }catch(e){ console.warn('start sound failed', e); }
+  try{
+    if (!SoundPlayer.play('bgm')){ AudioManager.startBgm(); }
+  }catch(e){ console.warn('bgm start failed', e); }
+
+  // 게임 루프
+  function animateGame(){
+    if (isGameOver) return cancelAnimationFrame(animationFrameId);
+    animationFrameId = requestAnimationFrame(animateGame);
+    try {
+      const delta = clock.getDelta();
+      elapsedTime = Math.floor((Date.now() - startTime)/1000);
+
+      // if paused, skip updates (freeze scene)
+  if (isPaused){ renderer.render(scene,camera); return; }
+
+      // 포즈/키보드 기반 이동
+      const moveSpeed = .1, maxPitch=.2, maxRoll=.5, rotLerp=.1;
+      if (moveState.left)  airplane.position.x -= moveSpeed;
+      if (moveState.right) airplane.position.x += moveSpeed;
+      if (moveState.up)    airplane.position.y += moveSpeed;
+      if (moveState.down)  airplane.position.y -= moveSpeed;
+
+      // 회전 연출
+      const pitch = moveState.up ?  maxPitch : (moveState.down ? -maxPitch : 0);
+      const roll  = moveState.left? -maxRoll  : (moveState.right?  maxRoll  : 0);
+      airplane.rotation.x = THREE.MathUtils.lerp(airplane.rotation.x, pitch, rotLerp);
+      airplane.rotation.z = THREE.MathUtils.lerp(airplane.rotation.z, roll,  rotLerp);
+
+      // 위치 제한
+      airplane.position.x = clamp(airplane.position.x, -25, 25);
+      airplane.position.y = clamp(airplane.position.y, -2, 12);
+
+      // 카메라 팔로우
+      camera.position.x = airplane.position.x;
+      camera.position.y = airplane.position.y + 5;
+      camera.lookAt(airplane.position);
+
+      // 시간 경과 (프레임 단위로 한 번만 감소)
+      difficultyIncreaseTimer += delta;
+      timeLeft -= delta;
+      if (timeLeft < 0) timeLeft = 0;
+      if (timeLeft <= 20 && !window._speedBoosted){ obstacleSpeed += .05; timeLeft = Math.max(0, timeLeft - 5); window._speedBoosted = true; showMessage('20초 돌파 - 속도 증가!', 1500); updateTimeUI(); }
+      if (difficultyIncreaseTimer >= 20){ obstacleSpeed += .02; showMessage('속도 증가!', 1500); difficultyIncreaseTimer = 0; }
+
+      // 장애물 이동/충돌
+      obstacles.forEach(o=>{
+        o.position.z += obstacleSpeed * 60 * delta; // speed scaled by delta
+        if (o.position.z > airplane.position.z + 5){ scene.remove(o); return; }
+        if (checkCollision(airplane, o)){
+          score += 1; timeLeft += 1; updateScoreUI(); updateTimeUI(); scene.remove(o);
+          try{
+            if (!SoundPlayer.play('coin')) AudioManager.playCoin();
+          }catch(e){ try{ AudioManager.playCoin(); }catch(_){} }
+        }
+      });
+      obstacles = obstacles.filter(o=>o.parent);
+
+      // trees도 앞으로 이동시키기(배경이 지나가는 효과)
+      trees.forEach(t=>{
+        t.position.z += obstacleSpeed * 40 * delta; // 나무는 장애물보다 약간 느리게
+        if (t.position.z > airplane.position.z + 10){ t.position.z = -100; t.position.x = (Math.random()-.5)*200; }
+      });
+
+      // ground collision: pause game, reduce time by 1, require restart to continue
+      if (airplane.position.y <= GROUND_Y){
+        timeLeft = Math.max(0, Math.floor(timeLeft) - 1);
+        updateTimeUI();
+        showMessage('바닥 충돌 - 시간 1초 감소, 재시작 필요', 1500);
+        isPaused = true; needResetOnResume = true;
+        obstacleTimer && clearInterval(obstacleTimer);
+  // stop bgm while paused
+  try{ SoundPlayer.stop('bgm'); }catch(e){}
+  try{ AudioManager.stopBgm(); }catch(e){}
+  setStartScreen(true);
+        if (timeLeft <= 0){ gameOver(); return; }
+        renderer.render(scene,camera);
+        return;
+      }
+
+      // 시간 부족 시 즉시 게임오버
+      if (timeLeft <= 0){ gameOver(); return; }
+
+      updateUI();
+      renderer.render(scene,camera);
+    } catch(err) {
+      console.error('animateGame error:', err);
+      cancelAnimationFrame(animationFrameId);
+    }
+  }
+  animateGame();
+
+  // 분류 루프 시작
+  startPoseLoop();
+}
+function updateUI(){
+  // timer: 화면에 표시되는 초가 바뀔 때만 업데이트하여 깜빡임 방지
+  const sec = Math.max(0, Math.ceil(timeLeft));
+  if (lastDisplayedSecond !== sec){ timerDisplay.textContent = sec; lastDisplayedSecond = sec; }
+  const sc = $('score-count'); if (sc) sc.textContent = score;
+}
+
+function updateScoreUI(){ const sc = $('score-count'); if (sc) sc.textContent = score; }
+function updateTimeUI(){ const td = $('timer-display'); if (td) td.textContent = Math.max(0, Math.ceil(timeLeft)); }
+function gameOver(){
+  isGameOver = true; finalScore.textContent = score; setGameOverScreen(true); setHUD(false);
+  cancelAnimationFrame(animationFrameId); obstacleTimer && clearInterval(obstacleTimer);
+  try{ SoundPlayer.stop('bgm'); }catch(e){}
+  try{ AudioManager.stopBgm(); }catch(e){}
+  // play game over sound
+  try{
+    if (!SoundPlayer.play('gameover')){
+      try{ AudioManager.playCoin(); }catch(e){}
+    }
+  }catch(e){ try{ AudioManager.playCoin(); }catch(_){} }
+}
+function checkCollision(a,b){ const A=new THREE.Box3().setFromObject(a), B=new THREE.Box3().setFromObject(b); return A.intersectsBox(B); }
+// handleCollision removed; game uses time-only and ground-hit pause logic
+
+// ---------- 포즈 → 이동 매핑 ----------
+function applyMoveFromLabel(label){
+  const s = (label||'').toLowerCase();
+  // allow combinations; set each direction flag if the label includes that word
+  // if the video is mirrored for preview, the model's left/right correspond to opposite onscreen directions
+  if (MIRROR_VIDEO){
+    moveState.up = s.includes('up');
+    moveState.down = s.includes('down');
+    // inverted mapping
+    moveState.left = s.includes('right');
+    moveState.right = s.includes('left');
+  } else {
+    moveState.up = s.includes('up');
+    moveState.down = s.includes('down');
+    moveState.left = s.includes('left');
+    moveState.right = s.includes('right');
+  }
+}
+
+function drawPose(pose){
+  if (!video.videoWidth) return;
+  if (overlay.width !== video.videoWidth){ overlay.width = video.videoWidth; overlay.height = video.videoHeight; }
+  const ctx = overlay.getContext('2d'); ctx.clearRect(0,0,overlay.width,overlay.height);
+  if (!pose || !pose.keypoints) return;
+  // keypoints
+  pose.keypoints.forEach(k=>{
+    if (k.score < .5) return;
+    const x = overlay.width - k.position.x; // mirror horizontally to match flipped video
+    ctx.beginPath(); ctx.arc(x, k.position.y, 3, 0, Math.PI*2);
+    ctx.fillStyle='rgba(255,255,255,.85)'; ctx.fill();
+  });
+  // skeleton (간단)
+  const adj = [['leftShoulder','rightShoulder'],['leftHip','rightHip'],['leftShoulder','leftElbow'],['leftElbow','leftWrist'],['rightShoulder','rightElbow'],['rightElbow','rightWrist'],['leftHip','leftKnee'],['leftKnee','leftAnkle'],['rightHip','rightKnee'],['rightKnee','rightAnkle'],['leftShoulder','leftHip'],['rightShoulder','rightHip']];
+  const byPart={}; pose.keypoints.forEach(k=>byPart[k.part]=k);
+  ctx.lineWidth=2; ctx.strokeStyle='rgba(255,255,255,.85)';
+  adj.forEach(([a,b])=>{
+    const A=byPart[a], B=byPart[b];
+    if (!A||!B||A.score<.5||B.score<.5) return;
+    const Ax = overlay.width - A.position.x; const Bx = overlay.width - B.position.x; // mirror
+    ctx.beginPath(); ctx.moveTo(Ax, A.position.y); ctx.lineTo(Bx, B.position.y); ctx.stroke();
+  });
+}
+
+// ---------- 실시간 분류 루프 ----------
+async function startPoseLoop(){
+  if (!ModelService.isLoaded()) return;
+  if (!CameraService.hasStream()) return;
+  if (running) return; // already running
+  running = true; setStatus('실시간 분석 시작');
+  async function loop(){
+    if (!running) return;
+    try {
+      const { pose, preds } = await ModelService.predictFromVideo(video);
+      drawPose(pose);
+      const sorted = ResultService.sort(preds);
+      const best = sorted[0];
+      // labelDisplay는 안정화된 값만 보여주도록 처리(깜빡임 방지)
+      // (콘솔에는 항상 best 출력하여 디버깅에 도움)
+      console.debug('[POSE best]', best.className, (best.probability*100).toFixed(1) + '%');
+      // 안정화: 확률 임계 + 연속 2프레임 이상일 때만 반영
+      if (best.probability >= PROB_TH){
+        if (best.className === lastLabel) repeatCount++; else { lastLabel = best.className; repeatCount = 1; }
+        console.debug('[POSE]', best.className, (best.probability*100).toFixed(1) + '%', 'repeat', repeatCount);
+        if (repeatCount >= STICKY){
+            applyMoveFromLabel(best.className);
+            // stable label만 mini-cam 아래에 표시
+            // 만약 미니캠이 미러링되어 있다면 사용자가 보는 방향에 맞게 좌우를 스왑하여 표시
+            if (MIRROR_VIDEO){
+              if (best.className.toLowerCase().includes('left')) displayLabel = best.className.replace(/left/i, 'right');
+              else if (best.className.toLowerCase().includes('right')) displayLabel = best.className.replace(/right/i, 'left');
+              else displayLabel = best.className;
+            } else {
+              displayLabel = best.className;
+            }
+            if (miniLabel) miniLabel.textContent = '라벨: ' + displayLabel;
+            if (miniLabel) miniLabel.classList.add('active');
+            setTimeout(()=> miniLabel && miniLabel.classList.remove('active'), 250);
+          }
+      } else {
+        // 낮은 확률은 화면에 표시하지 않고 콘솔로만 출력
+        if (best.className !== lastLabel){ lastLabel = best.className; repeatCount = 1; }
+        console.debug('[POSE low]', best.className, (best.probability*100).toFixed(1) + '%');
+      }
+
+      } catch(e){
+      setStatus('오류 발생 – 정지'); console.error(e);
+      running = false;
+    } finally {
+      await tf.nextFrame();
+      if (running) rafPose = requestAnimationFrame(loop);
+    }
+  }
+  cancelAnimationFrame(rafPose); rafPose = requestAnimationFrame(loop);
+}
+
+function stopPoseLoop(){ running = false; try{ if (rafPose) cancelAnimationFrame(rafPose); }catch(e){} rafPose = null; setStatus('분석 정지'); }
+
+// ---------- 이벤트 ----------
+btnLoad.addEventListener('click', async ()=>{
+  const url = modelUrl.value.trim();
+  if (!url) { loadStatus.textContent = '모델 URL을 입력하세요.'; return; }
+  try{
+    loadStatus.textContent = '모델 로딩 중…';
+    const info = await ModelService.load(url);
+    loadStatus.textContent = '모델 로드 완료: ' + (info.labels ? info.labels.join(', ') : 'OK');
+  }catch(e){
+    console.error('Model load error:', e);
+    loadStatus.textContent = '모델 로드 실패: ' + (e && e.message ? e.message : String(e)) + ' (https/localhost, CORS 확인)';
+  }
+});
+
+btnStartGame.addEventListener('click', async ()=>{
+  if (!ModelService.isLoaded()) return alert('먼저 모델을 로드하세요.');
+  try{
+    await CameraService.start(video, { facingMode:'user' });
+    setStatus('카메라 준비 완료');
+    // 즉시 HUD/미니캠 표시 (카메라가 켜졌으니 미리보기와 HUD를 보여줌)
+    setMiniCam(true); setHUD(true); setStartScreen(false);
+    // if paused due to ground hit, resume instead of fresh start
+    if (isPaused && needResetOnResume){
+      // reset plane position and flags
+      airplane.position.set(0,2,0);
+      isPaused = false; needResetOnResume = false;
+      // restart obstacle timer and pose loop
+  obstacleTimer && clearInterval(obstacleTimer);
+  obstacleTimer = setInterval(()=>createObstacle(false), obstacleSpawnInterval);
+  if (!running) startPoseLoop();
+      setStartScreen(false); setHUD(true); setMiniCam(true);
+      return;
+    }
+    // if model not loaded, still allow preview but inform user
+    if (!ModelService.isLoaded()){
+      loadStatus.textContent = '모델이 로드되지 않았습니다. 모델을 로드하세요.';
+      if (miniLabel) miniLabel.textContent = '라벨: 모델 미로드';
+      initGame(); startGame();
+    } else {
+      initGame(); startGame();
+    }
+  }catch(e){
+    setStatus('카메라 실패'); alert('카메라 권한/HTTPS를 확인하세요.');
+  }
+});
+
+btnHow.addEventListener('click', ()=>{
+  alert('포즈 라벨 up/down/left/right로 비행기를 조종합니다.\nWASD/방향키로도 보조 조작 가능!');
+});
+
+btnRestart.addEventListener('click', ()=>{ initGame(); startGame(); });
+btnExit.addEventListener('click', ()=>{
+  // 초기화
+  isGameOver=true; cancelAnimationFrame(animationFrameId);
+  obstacleTimer && clearInterval(obstacleTimer);
+  stopPoseLoop();
+  setGameOverScreen(false); setHUD(false); setMiniCam(false); setStartScreen(true);
+  setupInitialScene();
+});
+
+// 키보드 보조
+document.addEventListener('keydown', e=>{
+  if (!isGameStarted || isGameOver) return;
+  switch(e.key.toLowerCase()){
+    case 'w': case 'arrowup': moveState.up=true; break;
+    case 's': case 'arrowdown': moveState.down=true; break;
+    case 'a': case 'arrowleft': moveState.left=true; break;
+    case 'd': case 'arrowright': moveState.right=true; break;
+  }
+});
+document.addEventListener('keyup', e=>{
+  if (!isGameStarted || isGameOver) return;
+  switch(e.key.toLowerCase()){
+    case 'w': case 'arrowup': moveState.up=false; break;
+    case 's': case 'arrowdown': moveState.down=false; break;
+    case 'a': case 'arrowleft': moveState.left=false; break;
+    case 'd': case 'arrowright': moveState.right=false; break;
+  }
+});
+
+// 반응형
+addEventListener('resize', ()=>{
+  if (!camera || !renderer) return;
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// 시작용 배경 장면
+setupInitialScene();
+</script>
+</body>
+</html>
