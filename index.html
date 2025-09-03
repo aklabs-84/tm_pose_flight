@@ -68,6 +68,28 @@
     <input id="bgm-slider" type="range" min="0" max="100" value="100" style="width:120px" />
     <span id="bgm-volume-display" style="font-size:12px;opacity:.9">100%</span>
   </div>
+  <div class="ui-item" style="display:flex;align-items:center;gap:8px">
+    <label style="font-weight:600;font-size:12px">성능 모드</label>
+    <button id="perf-toggle" class="btn ghost" style="padding:6px 10px">토글</button>
+    <span id="perf-status" style="font-size:12px;opacity:.9">일반</span>
+  </div>
+  <div class="ui-item" style="display:flex;flex-direction:column;gap:6px">
+    <label style="font-weight:600;font-size:12px">LOD 설정</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="font-size:12px">나무 거리</label>
+      <input id="tree-lod-slider" type="range" min="10" max="200" value="60" style="width:120px" />
+      <span id="tree-lod-val">60</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="font-size:12px">장애물 거리</label>
+      <input id="obs-lod-slider" type="range" min="10" max="200" value="40" style="width:120px" />
+      <span id="obs-lod-val">40</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="font-size:12px">LOD 페이드</label>
+      <button id="lod-fade-toggle" class="btn ghost">Off</button>
+    </div>
+  </div>
     </div>
 
     <!-- =============== 우상단 카메라 =============== -->
@@ -123,6 +145,33 @@ const messageBox = $('message-box');
 // ---------- 게임 상태 ----------
 let scene, camera, renderer, clock, airplane, terrain;
 let obstacles = [], trees = [];
+// object pools for reuse
+let obstaclePool = [];
+let treePool = [];
+let isPerfMode = false;
+
+function enablePerfMode(){
+  if (isPerfMode) return; isPerfMode = true; $('perf-status').textContent = '저사양';
+  // reduce trees and obstacles
+  while(trees.length>20){ const t = trees.pop(); if (t.parent) scene.remove(t); treePool.push(t); }
+  while(obstacles.length>6){ const o = obstacles.pop(); if (o.parent) scene.remove(o); obstaclePool.push(o); }
+}
+function disablePerfMode(){
+  if (!isPerfMode) return; isPerfMode = false; $('perf-status').textContent = '일반';
+  // restore some objects
+  while(trees.length<50 && treePool.length>0){ const t = treePool.pop(); t.position.set((Math.random()-.5)*200, -5+Math.random()*2, (Math.random()-.5)*200); scene.add(t); trees.push(t); }
+  while(obstacles.length<12 && obstaclePool.length>0){ const o = obstaclePool.pop(); const x=(Math.random()-.5)*50, y=(Math.random()-.5)*20+5; o.position.set(x,y,-100); o.visible=true; scene.add(o); obstacles.push(o); }
+}
+
+function disposeAllPools(){
+  // dispose obstacle geometries/materials
+  obstaclePool.forEach(o=>{
+    try{ if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }catch(e){}
+  }); obstaclePool = [];
+  treePool.forEach(t=>{
+    t.traverse && t.traverse(node=>{ try{ if (node.geometry) node.geometry.dispose(); if (node.material) node.material.dispose(); }catch(e){} });
+  }); treePool = [];
+}
 let moveState = { up:false, down:false, left:false, right:false };
 let isGameStarted = false, isGameOver = false;
 let startTime = 0, elapsedTime = 0;
@@ -228,15 +277,41 @@ function createTerrain(){
   mesh.rotation.x = -Math.PI/2; mesh.position.y = -5; return mesh;
 }
 function createTree(){
-  const grp = new THREE.Group();
-  const trunk = new THREE.Mesh(new THREE.BoxGeometry(1,3,1), new THREE.MeshLambertMaterial({ color:0x8b4513 }));
-  const leaves = new THREE.Mesh(new THREE.BoxGeometry(3,3,3), new THREE.MeshLambertMaterial({ color:0x228b22 }));
-  leaves.position.y = 2; grp.add(trunk); grp.add(leaves); return grp;
+  // create or reuse a LOD tree (high detail group, low detail box)
+  let lod = null;
+  if (treePool.length>0){ lod = treePool.pop(); }
+  else {
+    lod = new THREE.LOD();
+    // high detail
+    const high = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.BoxGeometry(1,3,1), new THREE.MeshLambertMaterial({ color:0x8b4513 }));
+    const leaves = new THREE.Mesh(new THREE.BoxGeometry(3,3,3), new THREE.MeshLambertMaterial({ color:0x228b22 }));
+    leaves.position.y = 2; high.add(trunk); high.add(leaves);
+    // low detail
+    const low = new THREE.Mesh(new THREE.BoxGeometry(1.2,1.2,1.2), new THREE.MeshLambertMaterial({ color:0x228b22 }));
+    low.position.y = 0.5;
+    lod.addLevel(high, 0);
+    lod.addLevel(low, 60); // switch to low detail at distance
+  }
+  lod.visible = true; return lod;
 }
 function createObstacle(initial=false){
-  const obs = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), new THREE.MeshLambertMaterial({ color:0xff0000 }));
+  let lod = null;
+  if (obstaclePool.length>0){
+    lod = obstaclePool.pop();
+  } else {
+    lod = new THREE.LOD();
+    // high detail: red box
+    const high = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), new THREE.MeshLambertMaterial({ color:0xff0000 }));
+    // low detail: small red box
+    const low = new THREE.Mesh(new THREE.BoxGeometry(1.2,1.2,1.2), new THREE.MeshLambertMaterial({ color:0xff5555 }));
+    low.position.y = 0;
+    lod.addLevel(high, 0);
+    lod.addLevel(low, 40); // switch to low detail at distance
+  }
   const x = (Math.random()-.5)*50, y=(Math.random()-.5)*20+5, z= initial ? (Math.random()*-100) : -100;
-  obs.position.set(x,y,z); scene.add(obs); obstacles.push(obs);
+  lod.position.set(x,y,z); lod.visible = true;
+  scene.add(lod); obstacles.push(lod);
 }
 
 // ---------- 초기 장면 (타이틀 배경) ----------
@@ -263,9 +338,9 @@ function setupInitialScene(){
 
   function anim(){
     initialAnimationId = requestAnimationFrame(anim);
-    obstacles.forEach(o=>{ o.position.z += .1; if (o.position.z > camera.position.z) { o.position.z = -100; o.position.x=(Math.random()-.5)*50; o.position.y=(Math.random()-.5)*20+5; } });
-    trees.forEach(t=>{ t.position.z += .1; if (t.position.z > camera.position.z+10) { t.position.z = -100; t.position.x=(Math.random()-.5)*200; } });
-    renderer.render(scene,camera);
+  obstacles.forEach(o=>{ o.position.z += .1; if (o.position.z > camera.position.z) { o.position.z = -100; o.position.x=(Math.random()-.5)*50; o.position.y=(Math.random()-.5)*20+5; } o.update && o.update(camera); });
+  trees.forEach(t=>{ t.position.z += .1; if (t.position.z > camera.position.z+10) { t.position.z = -100; t.position.x=(Math.random()-.5)*200; } t.update && t.update(camera); });
+  renderer.render(scene,camera);
   }
   anim();
 }
@@ -275,6 +350,8 @@ function initGame(){
   // stop title animation and dispose previous renderer/canvas to free GL resources
   if (initialAnimationId) { cancelAnimationFrame(initialAnimationId); initialAnimationId = null; }
   try{ if (renderer && renderer.dispose) renderer.dispose(); }catch(e){}
+  // strongly dispose pooled resources
+  try{ disposeAllPools(); }catch(e){}
   const old = document.querySelector('canvas'); if (old) old.remove();
   scene = new THREE.Scene(); scene.background = new THREE.Color(0x87ceeb);
   camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, .1, 1000);
@@ -294,8 +371,9 @@ function initGame(){
   terrain = createTerrain(); scene.add(terrain);
 
   // seed background trees and obstacles to mirror the title preview
-  obstacles.forEach(o=>scene.remove(o)); obstacles=[];
-  trees.forEach(t=>{ if (t.parent) scene.remove(t); }); trees = [];
+  // return existing objects to pools instead of disposing
+  obstacles.forEach(o=>{ if (o.parent) scene.remove(o); obstaclePool.push(o); }); obstacles = [];
+  trees.forEach(t=>{ if (t.parent) scene.remove(t); treePool.push(t); }); trees = [];
   for(let i=0;i<50;i++){ const t = createTree(); t.position.set((Math.random()-.5)*200, -5+Math.random()*2, (Math.random()-.5)*200); scene.add(t); trees.push(t); }
   for(let i=0;i<12;i++) createObstacle(true);
 }
@@ -366,23 +444,28 @@ function startGame(){
       if (timeLeft <= 20 && !window._speedBoosted){ obstacleSpeed += .05; timeLeft = Math.max(0, timeLeft - 5); window._speedBoosted = true; showMessage('20초 돌파 - 속도 증가!', 1500); updateTimeUI(); }
       if (difficultyIncreaseTimer >= 20){ obstacleSpeed += .02; showMessage('속도 증가!', 1500); difficultyIncreaseTimer = 0; }
 
-      // 장애물 이동/충돌
-      obstacles.forEach(o=>{
+      // 장애물 이동/충돌 (역순 루프 + 재활용)
+      for (let i = obstacles.length - 1; i >= 0; i--){
+        const o = obstacles[i];
         o.position.z += obstacleSpeed * 60 * delta; // speed scaled by delta
-        if (o.position.z > airplane.position.z + 5){ scene.remove(o); return; }
-        if (checkCollision(airplane, o)){
-          score += 1; timeLeft += 1; updateScoreUI(); updateTimeUI(); scene.remove(o);
-          try{
-            if (!SoundPlayer.play('coin')) AudioManager.playCoin();
-          }catch(e){ try{ AudioManager.playCoin(); }catch(_){} }
+        o.update && o.update(camera);
+        if (o.position.z > airplane.position.z + 5){
+          // recycle
+          o.visible = false; if (o.parent) scene.remove(o); obstacles.splice(i,1); obstaclePool.push(o); continue;
         }
-      });
-      obstacles = obstacles.filter(o=>o.parent);
+        if (checkCollision(airplane, o)){
+          score += 1; timeLeft += 1; updateScoreUI(); updateTimeUI();
+          try{ if (!SoundPlayer.play('coin')) AudioManager.playCoin(); }catch(e){ try{ AudioManager.playCoin(); }catch(_){} }
+          // recycle
+          o.visible = false; if (o.parent) scene.remove(o); obstacles.splice(i,1); obstaclePool.push(o);
+        }
+      }
 
       // trees도 앞으로 이동시키기(배경이 지나가는 효과)
       trees.forEach(t=>{
         t.position.z += obstacleSpeed * 40 * delta; // 나무는 장애물보다 약간 느리게
         if (t.position.z > airplane.position.z + 10){ t.position.z = -100; t.position.x = (Math.random()-.5)*200; }
+        t.update && t.update(camera);
       });
 
       // ground collision: pause game, reduce time by 1, require restart to continue
@@ -436,8 +519,13 @@ function gameOver(){
       try{ AudioManager.playCoin(); }catch(e){}
     }
   }catch(e){ try{ AudioManager.playCoin(); }catch(_){} }
+  // free pooled resources on game over
+  try{ disposeAllPools(); }catch(e){}
 }
-function checkCollision(a,b){ const A=new THREE.Box3().setFromObject(a), B=new THREE.Box3().setFromObject(b); return A.intersectsBox(B); }
+// reusable boxes to avoid allocations
+const _ABox = new THREE.Box3();
+const _BBox = new THREE.Box3();
+function checkCollision(a,b){ _ABox.setFromObject(a); _BBox.setFromObject(b); return _ABox.intersectsBox(_BBox); }
 // handleCollision removed; game uses time-only and ground-hit pause logic
 
 // ---------- 포즈 → 이동 매핑 ----------
@@ -596,6 +684,8 @@ btnExit.addEventListener('click', ()=>{
   setGameOverScreen(false); setHUD(false); setMiniCam(false); setStartScreen(true);
   setupInitialScene();
 });
+
+const perfToggle = $('perf-toggle'); if (perfToggle) perfToggle.addEventListener('click', ()=>{ if (isPerfMode) disablePerfMode(); else enablePerfMode(); });
 
 // 키보드 보조
 document.addEventListener('keydown', e=>{
